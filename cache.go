@@ -37,6 +37,14 @@ type rediser interface {
 	Del(ctx context.Context, keys ...string) *redis.IntCmd
 }
 
+type locker interface {
+	Obtain(ctx context.Context, key string) (Lock, error)
+}
+
+type Lock interface {
+	Release(ctx context.Context) error
+}
+
 type Item struct {
 	Ctx context.Context
 
@@ -91,7 +99,8 @@ func (item *Item) ttl() time.Duration {
 //------------------------------------------------------------------------------
 
 type Options struct {
-	Redis rediser
+	Redis  rediser
+	Locker locker
 
 	LocalCache    *fastcache.Cache
 	LocalCacheTTL time.Duration
@@ -269,6 +278,21 @@ func (cd *Cache) getSetItemBytesOnce(item *Item) (b []byte, cached bool, err err
 		if err == nil {
 			cached = true
 			return b, nil
+		}
+
+		if cd.opt.Locker != nil {
+			l, err := cd.opt.Locker.Obtain(item.Context(), fmt.Sprintf("%s-lock", item.Key))
+			if err != nil {
+				return nil, fmt.Errorf("failed to obtain lock: %w", err)
+			}
+			defer func() {
+				err = l.Release(item.Context())
+			}()
+			b, err := cd.getBytes(item.Context(), item.Key, item.SkipLocalCache)
+			if err == nil {
+				cached = true
+				return b, err
+			}
 		}
 
 		b, ok, err := cd.set(item)
